@@ -1,105 +1,163 @@
-import streamlit as st
+from __future__ import annotations
+
 import pandas as pd
+import streamlit as st
 
-# 1. Configuración de Marca y Estilo Oficial
-st.set_page_config(page_title="HAVI | Hey Banco", page_icon="🏦", layout="wide")
+import logic
+from utils.styles import apply_custom_styles
 
-st.markdown("""
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,700;0,900;1,400&display=swap');
 
-    .stApp {
-        background-color: #F9F8F3;
-        font-family: 'Inter', sans-serif;
+st.set_page_config(page_title="HAVI | Hey Banco", layout="wide")
+apply_custom_styles()
+
+USER_ID = logic.DEFAULT_USER_ID
+
+TONE_MAP = {
+    "neutral": {"accent": "#212023", "surface": "#fbf8f2", "badge": "#a0cff0"},
+    "positive": {"accent": "#00b478", "surface": "#ecfbf4", "badge": "#00b478"},
+    "negative": {"accent": "#fa94ae", "surface": "#fff0f4", "badge": "#fa94ae"},
+}
+
+
+def initialize_state() -> None:
+    if "messages" in st.session_state:
+        return
+
+    initial_payload = logic.analyze_interaction("Inicio", USER_ID)
+    st.session_state.messages = [{"role": "assistant", "payload": initial_payload}]
+    st.session_state.current_options = initial_payload["options"]
+
+
+def apply_tone_overrides(payload: dict) -> None:
+    tone = TONE_MAP.get(payload["context"].get("ui_tone", "neutral"), TONE_MAP["neutral"])
+    st.markdown(
+        f"""
+        <style>
+        :root {{
+            --journey-accent: {tone["accent"]};
+            --journey-surface: {tone["surface"]};
+            --journey-badge: {tone["badge"]};
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_kpi_strip(metrics: list[dict]) -> None:
+    columns = st.columns(3)
+    for column, metric in zip(columns, metrics[:3]):
+        delta_html = f'<div class="kpi-delta">{metric["delta"]}</div>' if metric.get("delta") else ""
+        column.markdown(
+            f"""
+            <div class="kpi-card kpi-{metric["tone"]}">
+                <div class="kpi-label">{metric["label"]}</div>
+                <div class="kpi-value">{metric["value"]}</div>
+                {delta_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+def render_sidebar(context: dict) -> None:
+    st.sidebar.markdown(
+        f"""
+        <div class="profile-card">
+            <div class="profile-eyebrow">Perfil maestro</div>
+            <div class="profile-name">{context["name"]}</div>
+            <div class="profile-tier">{context["tier"]}</div>
+            <div class="profile-status tone-{context["status_tone"]}">
+                <span class="status-dot"></span>
+                <span>{context["status"]}</span>
+            </div>
+            <div class="profile-line">Edad: {context["age"]}</div>
+            <div class="profile-line">Ciudad: {context["city"]}</div>
+            <div class="profile-line">Score Buró: {context["score"]}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_journey_badge(payload: dict) -> None:
+    badge_copy = {
+        "retention": "Ruta activa: Retención",
+        "onboarding": "Ruta activa: Onboarding",
+        "finanzas": "Ruta activa: Finanzas",
+        "rendimientos": "Ruta activa: Inversión",
+        "soporte": "Ruta activa: Soporte",
     }
+    label = badge_copy.get(payload["intent"])
+    if not label:
+        return
+    st.markdown(f'<div class="journey-badge">{label}</div>', unsafe_allow_html=True)
 
-    .block-container {
-        padding: 2rem 5rem !important;
-        max-width: 900px;
-    }
 
-    h1 {
-        font-family: 'Inter', sans-serif;
-        font-weight: 900 !important;
-        color: #1A1A1A !important;
-        font-size: 4rem !important;
-        line-height: 0.95;
-        letter-spacing: -0.05em;
-        text-align: center;
-    }
+def render_payload(payload: dict) -> None:
+    render_journey_badge(payload)
+    st.markdown(payload["message"])
 
-    .bold-italic { font-style: italic; font-weight: 400; }
+    for figure in payload["charts"]:
+        st.plotly_chart(figure, width="stretch", config={"displayModeBar": False})
 
-    /* Tarjeta del Bot */
-    .bot-card {
-        background-color: #FFFFFF;
-        border-radius: 32px;
-        padding: 40px;
-        border: 1px solid #ECEBE6;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.02);
-    }
+    if isinstance(payload["table"], pd.DataFrame):
+        st.dataframe(payload["table"], width="stretch", hide_index=True)
 
-    /* Botones de Opciones Rápidas */
-    div.stButton > button {
-        background-color: #FFFFFF;
-        color: #1A1A1A;
-        border: 1px solid #1A1A1A;
-        border-radius: 20px;
-        padding: 0.5rem 1rem;
-        font-weight: 600;
-        transition: all 0.3s ease;
-    }
 
-    div.stButton > button:hover {
-        background-color: #1A1A1A;
-        color: #FFFFFF;
-    }
+def append_user_turn(user_text: str) -> None:
+    payload = logic.analyze_interaction(user_text, USER_ID)
+    st.session_state.messages.append({"role": "user", "content": user_text})
+    st.session_state.messages.append({"role": "assistant", "payload": payload})
+    st.session_state.current_options = payload["options"] or logic.DEFAULT_OPTIONS
 
-    /* Botón de Acceso Superior */
-    .login-btn {
-        float: right;
-        background-color: #3D3D3F !important;
-        color: white !important;
-    }
 
-    [data-testid="stHeader"], footer { visibility: hidden; }
-    </style>
-    """, unsafe_allow_html=True)
+def latest_payload() -> dict:
+    for message in reversed(st.session_state.messages):
+        if message["role"] == "assistant":
+            return message["payload"]
+    return logic.analyze_interaction("Inicio", USER_ID)
 
-# 2. Navegación
-nav_l, nav_r = st.columns([4, 1])
-with nav_l:
-    st.image("https://banco.hey.inc/content/dam/heybanco/globales/hey-banco-logo.svg", width=110)
-with nav_r:
-    st.button("Acceso", key="login")
 
-# 3. Hero Section
-st.markdown('<h1 style="margin-top:40px;">Tu asistente <span class="bold-italic">inteligente</span></h1>', unsafe_allow_html=True)
-st.write("<br>", unsafe_allow_html=True)
+initialize_state()
+current_payload = latest_payload()
+apply_tone_overrides(current_payload)
 
-# 4. Interfaz de Bot Simplificada
-st.markdown('<div class="bot-card">', unsafe_allow_html=True)
+st.markdown(
+    """
+    <div class="hero-wrap">
+        <div class="hero-brand">hey,banco</div>
+        <div class="hero-headline">Tu asistente <span class="hero-italic">inteligente</span></div>
+        <div class="hero-subtitle">
+            Respuestas accionables, lectura ejecutiva y una experiencia conversacional lista para la demo final.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-# Mensaje inicial del bot
-st.chat_message("assistant").write("¡Hola! Soy **HAVI**. Analicé tus movimientos y tengo algunas sugerencias para ti hoy. ¿En qué prefieres enfocarte?")
+render_kpi_strip(current_payload["metrics"])
+render_sidebar(current_payload["context"])
 
-st.write("---")
+for index, message in enumerate(st.session_state.messages):
+    avatar = "🟢" if message["role"] == "assistant" else "🙂"
+    with st.chat_message(message["role"], avatar=avatar):
+        if message["role"] == "assistant":
+            render_payload(message["payload"])
+        else:
+            st.markdown(message["content"])
 
-# Botones de Opciones (Simulando interacción dinámica)
-col_opt1, col_opt2, col_opt3 = st.columns(3)
+st.markdown('<div class="section-label">Siguiente paso</div>', unsafe_allow_html=True)
+button_columns = st.columns(max(len(st.session_state.current_options), 1))
+for index, option in enumerate(st.session_state.current_options):
+    if button_columns[index].button(
+        option,
+        key=f"quick_action_{len(st.session_state.messages)}_{index}",
+        use_container_width=True,
+    ):
+        append_user_turn(option)
+        st.rerun()
 
-with col_opt1:
-    if st.button("📈 Ver Rendimientos"):
-        st.info("Tus inversiones han crecido un **5.2%** este mes.")
-with col_opt2:
-    if st.button("💰 Plan de Ahorro"):
-        st.success("Puedes ahorrar **$1,200 MXN** extra ajustando tus gastos en 'Restaurantes'.")
-with col_opt3:
-    if st.button("💳 Mi Tarjeta"):
-        st.warning("Tu fecha de corte es en 3 días. ¿Quieres programar el pago?")
-
-st.markdown('</div>', unsafe_allow_html=True)
-
-# Input de texto opcional al final
-st.write("<br>", unsafe_allow_html=True)
-st.chat_input("O escribe otra duda aquí...")
+if prompt := st.chat_input("Escribe tu consulta a HAVI..."):
+    append_user_turn(prompt)
+    st.rerun()
