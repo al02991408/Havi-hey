@@ -297,22 +297,9 @@ def load_user_transactions(user_id: str) -> tuple[pd.DataFrame | None, str | Non
 # ===========================================================================
 # PUNTO DE ENTRADA PRINCIPAL
 # ===========================================================================
-
-def analyze_interaction(user_input: str, user_id: str = DEFAULT_USER_ID) -> dict:
-    """
-    Función central del motor HAVI. Es el único método que app.py y app_mobile.py
-    deben llamar. Recibe texto crudo del usuario y devuelve SIEMPRE el dict de 7 llaves.
-
-    Flujo interno:
-        1. Carga datos (todos desde caché tras la primera llamada).
-        2. Si alguna fuente falla → devuelve payload de mantenimiento.
-        3. Construye el contexto del usuario (snapshot de sus KPIs).
-        4. Detecta el intent basándose en keywords del input.
-        5. Delega la construcción del payload al builder correspondiente.
-
-    El try/except externo garantiza que NINGUNA excepción burbujee a Streamlit.
-    En el peor caso el usuario ve el mensaje de mantenimiento y no un traceback.
-    """
+def analyze_interaction(user_input: str, user_id: str = DEFAULT_USER_ID, recent_topics: list = None) -> dict:
+    recent_topics = recent_topics or []
+    
     try:
         master_clients, master_error = load_master_clients()
         products,       prod_error   = load_products()
@@ -325,7 +312,6 @@ def analyze_interaction(user_input: str, user_id: str = DEFAULT_USER_ID) -> dict
         context = get_user_context(user_id, master_clients, products, user_tx)
         intent  = _detect_intent(user_input, context)
 
-        # Tabla de despacho: cada intent → su builder de payload.
         if intent == "card_onboarding":
             return _build_card_onboarding_payload(user_input, context)
         if intent == "onboarding":
@@ -337,11 +323,53 @@ def analyze_interaction(user_input: str, user_id: str = DEFAULT_USER_ID) -> dict
         if intent == "finanzas":
             return _build_finanzas_payload(context, user_tx)
 
-        # Fallback: soporte conversacional.
-        return _build_support_payload(context, user_tx, user_input)
+        # MODIFICADO: Enviar recent_topics al flujo de soporte
+        return _build_support_payload(context, user_tx, user_input, recent_topics)
 
     except Exception:
         return _maintenance_payload(user_id, "sistema")
+
+
+def _build_support_payload(context: dict, user_transactions: pd.DataFrame, user_input: str, recent_topics: list) -> dict:
+    text = (user_input or "").strip().lower()
+    if any(kw in text for kw in CARD_BLOCK_KEYWORDS):
+        return _build_card_block_payload(context)
+    if any(kw in text for kw in CHARGE_KEYWORDS):
+        return _build_charge_payload(context, user_transactions)
+    if any(kw in text for kw in SECURITY_KEYWORDS):
+        return _build_security_payload(context)
+    
+    # MODIFICADO: Pasar tópicos a la ayuda genérica
+    return _build_generic_help_payload(context, recent_topics)
+
+
+def _build_generic_help_payload(context: dict, recent_topics: list) -> dict:
+    options = ["Analizar mis Gastos", "Configurar Seguridad", "Centro de Ayuda"]
+    
+    # NUEVO: Lógica para inyectar opciones basadas en el historial del usuario
+    if "finanzas" in recent_topics:
+        options.insert(0, "Revisar Presupuesto Mensual")
+    if "rendimientos" in recent_topics:
+        options.insert(0, "Ver Proyección de Inversión")
+    if "card_onboarding" in recent_topics:
+        options.insert(0, "Rastrear Envío de Tarjeta")
+        
+    options = options[:4]
+
+    message = (
+        f"{context['name']}, estoy aquí para resolverlo contigo.\n\n"
+        "He guardado el contexto de nuestras interacciones. Cuéntame qué necesitas o elige "
+        "una de las opciones rápidas para retomar un tema pendiente."
+    )
+    return {
+        "message": message,
+        "options": options,
+        "charts":  [],
+        "metrics": _support_metrics(context, "Acompañamiento activo"),
+        "table":   None,
+        "intent":  "soporte",
+        "context": {**context, "ui_tone": "neutral"},
+    }
 
 
 # ===========================================================================
